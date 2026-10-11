@@ -53,7 +53,7 @@ inline void traceChannels(const IRBuffer& ir, InputMode mode, std::vector<float>
 
 } // namespace irdisplay
 
-inline IRDisplay computeIRDisplay(const IRBuffer& ir, InputMode mode, int waveColumns = 800, int specPoints = 256) {
+inline IRDisplay computeIRDisplay(const IRBuffer& ir, InputMode mode, int waveColumns = 800, int specPoints = 256, bool withSpectrum = true) {
     IRDisplay d;
     std::vector<float> tr[2]; int traces = 0;
     irdisplay::traceChannels(ir, mode, tr, traces);
@@ -73,6 +73,7 @@ inline IRDisplay computeIRDisplay(const IRBuffer& ir, InputMode mode, int waveCo
             d.waveMin[t][size_t(c)] = mn; d.waveMax[t][size_t(c)] = mx;
             d.peak = std::max(d.peak, std::max(std::fabs(mn), std::fabs(mx)));
         }
+        if (!withSpectrum) continue;
         // spectrum: zero-padded real FFT, then log-spaced resampling (power average over wide bands, interpolation over narrow ones)
         size_t n = 8192; while (n < len) n *= 2; n = std::min<size_t>(n, size_t(1) << 21);
         std::vector<float> x(n, 0.0f); for (size_t i = 0; i < std::min(len, n); ++i) x[i] = tr[t][i];
@@ -95,11 +96,56 @@ inline IRDisplay computeIRDisplay(const IRBuffer& ir, InputMode mode, int waveCo
     return d;
 }
 
+// ---- what the IR editor draws -------------------------------------------------------------------------------------
+// The editor's time axis is the whole IR after stretch and automatic start trim, in its ORIGINAL orientation (before
+// Reverse). Begin / End are positions on that axis, so they can always be dragged back out. Two layers are provided:
+//   base : the whole axis, without Begin / End / auto length / envelope / reverse (what could be kept), drawn dimmed
+//   kept : the IR the convolver really uses (all options applied), drawn bright between the markers
+// With End = OFF and auto length off, keptEndMs == axisMs: the E marker sits on the right edge.
+struct IREditorDisplay {
+    bool   valid = false;
+    double sampleRate = 48000.0;
+    double axisMs = 0.0;            // length of the time axis
+    double originMs = 0.0;          // silence removed by the automatic start trim (before the axis origin)
+    double keptStartMs = 0.0;       // position of the B marker
+    double keptEndMs = 0.0;         // position of the E marker
+    bool   endAtAxisEnd = true;     // E marker on the right edge
+    IRDisplay base;                 // wave only (no spectrum), scaled like `kept`
+    IRDisplay kept;                 // wave + spectrum
+};
+
+inline IREditorDisplay computeIREditorDisplay(const IRBuffer& src, const IROptions& o, InputMode mode, int waveColumns = 800, int specPoints = 256) {
+    IREditorDisplay e;
+    IRBuffer kept; IRTrimInfo ti;
+    if (!processIR(src, o, kept, &ti)) return e;
+    IROptions ob = o;
+    ob.beginMs = 0; ob.endMs = 0; ob.autoLength = false; ob.attackMs = 0; ob.decayDb = 0; ob.reverse = false;
+    ob.norm = NormMode::Off; ob.maxLength = size_t(1) << 40;
+    IRBuffer base;
+    if (!processIR(src, ob, base)) return e;
+    e.kept = computeIRDisplay(kept, mode, waveColumns, specPoints, true);
+    e.base = computeIRDisplay(base, mode, waveColumns, specPoints, false);
+    if (!e.kept.valid || !e.base.valid) return e;
+    for (int t = 0; t < 2; ++t) {                                   // same scale as the kept IR
+        for (auto& v : e.base.waveMin[t]) v *= ti.normGain;
+        for (auto& v : e.base.waveMax[t]) v *= ti.normGain;
+    }
+    e.base.peak *= ti.normGain;
+    const double msPerSample = 1000.0 / ti.sampleRate;
+    e.valid = true; e.sampleRate = ti.sampleRate;
+    e.axisMs = double(base.length()) * msPerSample;
+    e.originMs = double(ti.originSamples) * msPerSample;
+    e.keptStartMs = double(ti.keptStart) * msPerSample;
+    e.keptEndMs = double(ti.keptEnd) * msPerSample;
+    e.endAtAxisEnd = ti.keptEnd >= base.length();
+    return e;
+}
+
 // Background computation for the UI: request() from the UI thread, fetch() polled from the idle callback.
 // `job` runs on the worker thread and must return the IR to display (typically loadWavFile + processIR).
 class IRDisplayWorker {
 public:
-    using Job = std::function<bool(IRBuffer&, InputMode&)>;
+    using Job = std::function<bool(IRBuffer&, InputMode&)>;   // for a display of an already prepared IR (see computeIREditorDisplay for the editor)
     IRDisplayWorker() : th_([this] { loop(); }) {}
     ~IRDisplayWorker() { { std::lock_guard<std::mutex> lk(m_); quit_ = true; } cv_.notify_all(); th_.join(); }
     IRDisplayWorker(const IRDisplayWorker&) = delete; IRDisplayWorker& operator=(const IRDisplayWorker&) = delete;

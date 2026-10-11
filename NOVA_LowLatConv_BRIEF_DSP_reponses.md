@@ -111,33 +111,46 @@ Ce sont des **paramètres de sortie** : le wrapper CLAP les relit à la fin de c
 **Pourquoi pas un state en lecture seule ?** Vérifié dans `DistrhoPluginCLAP.cpp` : `updateStateValue()` (le mécanisme prévu pour pousser un state du DSP vers l'UI) est un **stub** sous CLAP (`bool updateState(const char*, const char*) { return true; }`) : l'UI ne serait jamais prévenue. Les paramètres de sortie ne conviennent pas à des tableaux de 800 points.
 
 **Ce qui est fourni et testé** (`ir_display.hpp`, `LowLatConvIR.hpp`) :
-- `computeIRDisplay(ir, inputMode)` : WAVE = min / max par colonne (800 par défaut), SPECTRUM = module en dB sur axe logarithmique (256 points, 20 Hz à min(20 kHz, 0,45·fs), plancher -120 dB), pour 1 ou 2 traces (L, R).
-- `LLCParams::makeIROptions(valeurs, fréquence)` et `makeInputMode(valeurs)` : **le DSP et l'UI les utilisent tous les deux** → exactement la même IR, les mêmes transformations (rognage, étirement, attaque, décroissance, inversion, normalisation, mode d'entrée).
-- `IRDisplayWorker` : thread de fond côté UI. `request(tâche)` depuis l'UI, `fetch(sortie, dernièreVersion)` appelé dans le rappel d'inactivité. Une demande plus récente remplace une demande en cours.
+- `computeIREditorDisplay(raw, options, mode)` : tout ce que dessine l'éditeur d'IR. Il renvoie l'**axe du temps**, la position des marqueurs **B** et **E**, une courbe « base » (toute l'IR, en estompé) et la courbe « kept » (l'IR réellement jouée, en vif, avec son spectre).
+- `computeIRDisplay(ir, mode)` : le calcul de base (WAVE = min / max par colonne, 800 par défaut ; SPECTRUM = dB sur axe logarithmique, 256 points, 20 Hz à min(20 kHz, 0,45·fs), plancher -120 dB ; 1 ou 2 traces L / R).
+- `LLCParams::makeIROptions(valeurs, fréquence)` et `makeInputMode(valeurs)` : **le DSP et l'UI les utilisent tous les deux** → exactement la même IR, les mêmes transformations.
+- Le calcul se fait dans un thread de fond côté UI (à écrire avec les classes `Thread` et `Mutex` de DPF, pas `std::thread` : voir la remarque Windows plus bas).
+
+### Marqueurs B et E : où ils se placent (vérifié)
+L'axe du temps de l'éditeur est **toute l'IR après étirement et rognage automatique du silence initial, dans son sens d'origine** (avant Reverse). **Begin** et **End** sont des positions sur cet axe : on peut donc toujours faire glisser un marqueur vers l'extérieur. L'axe ne rétrécit **jamais** quand on règle Begin ou End.
+
+| Réglages | Marqueur B | Marqueur E |
+|---|---|---|
+| IR chargée, réglages par défaut (End = OFF) | 0 | **bord droit de l'axe** (`endAtAxisEnd = true`) |
+| End = 1500 ms (axe de 2000 ms) | 0 | 1500 ms ; l'axe reste à 2000 ms |
+| End plus grand que l'axe | 0 | ramené au bord droit |
+| Begin 200 ms, End 1500 ms | 200 ms | 1500 ms ; durée jouée = 1300 ms |
+| Longueur auto active | 0 | position calculée (avant le bord droit) |
+| Reverse actif | inchangé | inchangé |
+| Étirement 200 % / 50 % | 0 | bord droit ; l'axe double / est divisé par deux |
+| Source en 44,1 kHz jouée en 48 kHz | 0 | bord droit ; la durée en ms est conservée |
+
+Pour l'UI : le champ `endAtAxisEnd` dit si E est sur le bord droit. Quand l'utilisateur relâche le marqueur E tout à droite, envoyer `pEnd = 0` (OFF) ; sinon `pEnd` = sa position en ms sur l'axe. `keptStartMs` / `keptEndMs` sont les positions à dessiner, `axisMs` la largeur de l'axe, `pIRLengthMs` (DSP) reste la durée réellement jouée (`keptEndMs - keptStartMs`, vérifié par un test).
+Quand Reverse est actif, la courbe « base » reste dans le sens d'origine et la courbe « kept » est miroir : c'est le comportement voulu pour que les marqueurs restent compréhensibles.
+Le rognage automatique peut décaler l'origine d'environ 1 ms quand on étire fortement l'IR (le rééchantillonnage crée un petit pré-écho que le seuil de -60 dB détecte) : c'est normal.
 
 ```cpp
 // UI : membres
-llc::IRDisplayWorker fDisplayWorker;  llc::IRDisplay fDisplay;  uint32_t fDisplayVersion = 0;
-float fValues[LLCParams::pCount];  std::string fIRPath;     // fValues mis à jour dans parameterChanged()
+llc::IREditorDisplay fEditor;  uint32_t fEditorVersion = 0;   // résultat du thread de fond
+float fValues[LLCParams::pCount];  std::string fIRPath;       // fValues mis à jour dans parameterChanged()
 
-void requestDisplayUpdate()
-{
-    std::array<float, LLCParams::pCount> v; std::copy(fValues, fValues + LLCParams::pCount, v.begin());
-    const std::string path = fIRPath; const double sr = getSampleRate();
-    fDisplayWorker.request([v, path, sr](llc::IRBuffer& ir, llc::InputMode& mode) {
-        llc::IRBuffer raw;
-        if (path.empty() || llc::loadWavFile(path, raw) != llc::WavStatus::Ok) return false;
-        if (!llc::processIR(raw, LLCParams::makeIROptions(v.data(), sr), ir)) return false;
-        mode = LLCParams::makeInputMode(v.data());  return true; });
-}
-void uiIdle() override { if (fDisplayWorker.fetch(fDisplay, fDisplayVersion)) { fDisplayVersion = fDisplay.version; repaint(); } }
+// dans le thread de fond (classe Thread de DPF), à chaque changement de chemin ou de réglage d'IR :
+llc::IRBuffer raw;
+if (llc::loadWavFile(path, raw) == llc::WavStatus::Ok)
+    result = llc::computeIREditorDisplay(raw, LLCParams::makeIROptions(values, sampleRate), LLCParams::makeInputMode(values));
+// dans le dessin : B = fEditor.keptStartMs / fEditor.axisMs, E = fEditor.keptEndMs / fEditor.axisMs (fractions de la largeur)
 ```
-Appeler `requestDisplayUpdate()` quand le chemin change **et** quand l'un des paramètres `pInputMode … pNorm` change (les valeurs appliquées au relâchement suffisent).
+Appeler la mise à jour quand le chemin change **et** quand l'un des paramètres `pInputMode … pNorm` change (les valeurs appliquées au relâchement suffisent).
 
 ### Réponses aux sous-questions
 - **a)** Calculées côté **DSP/chargement** : non possible vers l'UI sous CLAP (voir plus haut). Calculées **côté UI avec le même code** : oui. Durée typique : quelques ms à quelques dizaines de ms (lecture + préparation de l'IR + FFT du spectre) ; le thread de fond de l'UI évite tout blocage de l'interface.
 - **b)** Transmission : aucune transmission. Taille maximale : sans objet. Un `IRDisplay` pèse environ 800×4×2×2 + 256×4×2 ≈ 15 Ko en mémoire.
-- **c)** L'UI sait qu'une nouvelle version est prête grâce au champ `IRDisplay::version` (incrémenté à chaque résultat) : `fetch()` renvoie `true` seulement si la version a changé.
+- **c)** L'UI sait qu'une nouvelle version est prête grâce à un numéro de version incrémenté à chaque résultat du thread de fond (à écrire avec l'UI) : elle ne redessine que si le numéro a changé.
 - **d)** Durée et longueur réelles : `pIRLengthMs` (DSP, autoritaire) suffit pour l'affichage de la durée ; `IRDisplay` contient aussi `durationMs`, `lengthSamples`, `peak`, `fMin`, `fMax`.
 
 ### Quelle trace est dessinée (important pour le mode d'entrée)
@@ -153,7 +166,7 @@ Appeler `requestDisplayUpdate()` quand le chemin change **et** quand l'un des pa
 Les chemins croisés d'un vrai stéréo en mode Stereo (L→R, R→L) ne sont pas dessinés.
 
 ### Dépendances à prévoir côté UI
-- Inclure `ir_display.hpp`, `wav_loader.hpp`, `LowLatConvIR.hpp` (même `-DLLC_USE_PFFFT` et mêmes chemins d'inclusion que le DSP).
+- Inclure `ir_display.hpp`, `wav_loader.hpp`, `LowLatConvIR.hpp` (ne pas utiliser `std::thread` / `std::mutex` côté UI : sous Windows, utiliser `Thread` et `Mutex` de DPF) (même `-DLLC_USE_PFFFT` et mêmes chemins d'inclusion que le DSP).
 - **Piège de liaison** : sous CLAP / VST3, DSP et UI sont dans le même binaire. `dr_wav_impl.cpp` ne doit être compilé **qu'une fois** (dans `FILES_DSP`), sinon « multiple definition » (vérifié). Sous LV2 (binaire d'UI séparé), il faut l'ajouter aussi à `FILES_UI`.
 
 ---

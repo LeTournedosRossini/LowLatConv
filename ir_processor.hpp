@@ -44,6 +44,16 @@ struct IROptions {
     size_t maxLength        = size_t(1) << 20;
 };
 
+// Where the kept region sits on the editor's time axis (the stretched IR, starting at the auto-trimmed start).
+struct IRTrimInfo {
+    double sampleRate = 48000.0;
+    size_t originSamples = 0;     // samples removed by the automatic start trim (axis origin)
+    size_t axisSamples = 0;       // length of the axis: stretched IR length minus the origin
+    size_t keptStart = 0;         // Begin, on the axis
+    size_t keptEnd = 0;           // End, on the axis (== axisSamples when End is OFF and the tail is not cut)
+    float  normGain = 1.0f;       // gain applied by the normalisation (1 when Off)
+};
+
 namespace irdetail {
 
 inline double besselI0(double x) {
@@ -94,7 +104,7 @@ inline float fin(float v) { uint32_t b; std::memcpy(&b, &v, 4); return ((b & 0x7
 } // namespace irdetail
 
 // Returns false if the input is unusable (empty, silent, invalid sample rate).
-inline bool processIR(const IRBuffer& src, const IROptions& o, IRBuffer& out) {
+inline bool processIR(const IRBuffer& src, const IROptions& o, IRBuffer& out, IRTrimInfo* info = nullptr) {
     out = IRBuffer{};
     if (src.ch.empty() || src.sampleRate < 1000.0 || o.targetSampleRate < 1000.0) return false;
     size_t n0 = 0; for (auto& c : src.ch) n0 = std::max(n0, c.size());
@@ -115,6 +125,7 @@ inline bool processIR(const IRBuffer& src, const IROptions& o, IRBuffer& out) {
     const double fs = o.targetSampleRate;
     auto msToSamples = [&](double ms) { return size_t(std::max(0.0, ms) * 0.001 * fs + 0.5); };
     size_t len = b.length(), start = 0, end = len;
+    const size_t fullLen = len;
     bool cutEnd = false, cutStart = false;
 
     if (o.autoTrimStart) {
@@ -138,6 +149,7 @@ inline bool processIR(const IRBuffer& src, const IROptions& o, IRBuffer& out) {
         }
     }
     if (end - start > o.maxLength) { end = start + o.maxLength; cutEnd = true; }
+    if (info) { info->sampleRate = o.targetSampleRate; info->originSamples = origin; info->axisSamples = fullLen - origin; info->keptStart = start - origin; info->keptEnd = end - origin; info->normGain = 1.0f; }
     for (auto& c : b.ch) c = std::vector<float>(c.begin() + long(start), c.begin() + long(end));
     len = b.length();
 
@@ -167,6 +179,7 @@ inline bool processIR(const IRBuffer& src, const IROptions& o, IRBuffer& out) {
         else for (auto& c : b.ch) { double e = 0; for (float v : c) e += double(v) * v; ref = std::max(ref, std::sqrt(e)); }
         if (ref <= 1e-20) return false;
         const float g = float(std::pow(10.0, o.normTargetDb / 20.0) / ref);
+        if (info) info->normGain = g;
         for (auto& c : b.ch) for (auto& v : c) v *= g;
     } else if (peakOf(0, len) <= 0) return false;
     out = std::move(b);
