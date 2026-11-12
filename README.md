@@ -1,7 +1,7 @@
 # Moteur de convolution à latence nulle pour guitare (base du futur plugin CLAP / DPF / NanoVG)
 
 Tout est en C++17, en-têtes seuls (sauf PFFFT et dr_wav, fournis dans `third_party/`).
-Licences : PFFFT (type BSD), dr_wav (domaine public ou MIT-0).
+Licence du projet : **GNU General Public License v3 ou ultérieure** (`LICENSE`). Éléments tiers, tous compatibles : PFFFT (type BSD), dr_wav (domaine public ou MIT-0), police Inter (SIL OFL 1.1, `fonts/OFL-Inter.txt`).
 
 ## Chaîne de traitement (`processor.hpp`, `ConvolutionProcessor`)
 

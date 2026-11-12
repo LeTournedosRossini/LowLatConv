@@ -47,7 +47,7 @@ protected:
     const char* getDescription() const override { return "Zero-latency convolution (cabinet / impulse response loader) with EQ."; }
     const char* getMaker() const override { return "LowLatConv authors"; }
     const char* getHomePage() const override { return ""; }
-    const char* getLicense() const override { return "Open source (licence to be chosen)"; }
+    const char* getLicense() const override { return "GPL-3.0-or-later"; }
     uint32_t getVersion() const override { return d_version(0, 1, 0); }
     int64_t getUniqueId() const override { return d_cconst('L', 'L', 'C', 'v'); }
 
