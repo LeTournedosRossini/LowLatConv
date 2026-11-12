@@ -16,7 +16,7 @@ jobs:
       - run: make -f Makefile.tests -j2 check
 
   tests-macos:
-    runs-on: macos-14            # Apple silicon: also exercises the ARM64 / NEON paths
+    runs-on: macos-latest            # Apple silicon: also exercises the ARM64 / NEON paths
     steps:
       - uses: actions/checkout@v4
       - run: make -f Makefile.tests -j3 check
@@ -43,7 +43,7 @@ jobs:
         include:
           - { target: linux-x86_64,    runs-on: ubuntu-22.04 }
           - { target: win64,           runs-on: ubuntu-22.04 }
-          - { target: macos-universal, runs-on: macos-14 }
+          - { target: macos-universal, runs-on: macos-latest }
     runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v4
