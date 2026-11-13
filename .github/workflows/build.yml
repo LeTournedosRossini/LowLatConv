@@ -65,3 +65,20 @@ jobs:
           name: LowLatConv-${{ matrix.target }}
           path: bin/
           if-no-files-found: warn
+      # Archives that plain tools can unpack (.tar.gz), next to the DPF action's .tar.xz / .pkg / .zip: the .clap alone, same names on every Release.
+      - name: Extra archives for the Release
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.target != 'win64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p extra/stage
+          if [ "${{ matrix.target }}" = "macos-universal" ]; then
+            NAME=LowLatConv-macOS
+            # the bundle: found in bin/ (a LowLatConv.clap directory)
+            cp -R bin/LowLatConv.clap extra/stage/
+          else
+            NAME=LowLatConv-Linux
+            cp bin/LowLatConv.clap extra/stage/
+          fi
+          tar -czf "extra/$NAME.tar.gz" -C extra/stage LowLatConv.clap
+          gh release upload "${{ github.ref_name }}" "extra/$NAME.tar.gz" --clobber --repo "${{ github.repository }}"
